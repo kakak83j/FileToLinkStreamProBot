@@ -109,7 +109,7 @@ def register_handlers(bot):
         short_code = generate_short_code()
        
         # ✅ FIX: Permanent links (never expire)
-        expiry_time = None  # ← अब लिंक कभी एक्सपायर नहीं होंगे
+        expiry_time = None
        
         file_meta = FileMetadata(
             file_id=file_id,
@@ -121,7 +121,7 @@ def register_handlers(bot):
             short_code=short_code,
             chat_id=event.chat_id,
             message_id=event.id,
-            expiry_time=expiry_time  # ← None = Permanent
+            expiry_time=expiry_time
         )
        
         await files_col.insert_one(file_meta.dict())
@@ -164,10 +164,10 @@ def register_handlers(bot):
             ]
         )
 
-    # ─── NEW: Direct Link Handler ──────────────────────────────────────────────
+    # ─── HIGH-SPEED Direct Link Handler (aria2c + Multi-Threading) ───────────
     @bot.on(events.NewMessage(pattern=r'https?://[^\s]+'))
     async def link_handler(event):
-        """Handle direct download links and convert to permanent bot link"""
+        """Handle direct download links with high speed (aria2c + multi-threading)"""
         
         # Ban Check
         user_data = await users_col.find_one({"user_id": event.sender_id})
@@ -187,54 +187,152 @@ def register_handlers(bot):
             )
 
         url = event.raw_text.strip()
-        
-        # Download the file from URL
+        msg = await event.reply("📥 **Downloading file at high speed...**")
+
         try:
-            import aiohttp
+            import subprocess
             import os
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        return await event.reply("❌ Failed to fetch the file from the given URL.")
-                    
-                    # Get filename from URL
-                    filename = url.split('/')[-1].split('?')[0] or "downloaded_file"
-                    content = await resp.read()
-                    
-                    # Save temporarily
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                        tmp.write(content)
-                        tmp_path = tmp.name
-                    
-                    # Send to Telegram to get file_id
-                    msg = await event.reply("📤 Uploading to Telegram...")
-                    file_msg = await bot.send_file(
-                        event.chat_id,
-                        tmp_path,
-                        caption=filename
-                    )
-                    
-                    # Extract file_id
-                    if file_msg.document:
-                        doc = file_msg.document
-                        file_id = f"{doc.id}_{doc.access_hash}"
-                        file_name = filename
-                        file_size = doc.size
-                        mime_type = doc.mime_type or "application/octet-stream"
-                    else:
-                        return await event.reply("❌ Failed to upload file to Telegram.")
-                    
-                    # Clean up
-                    os.remove(tmp_path)
-                    
+            import tempfile
+            import aiohttp
+            import asyncio
+            import time
+
+            # Check if aria2c is available (for maximum speed)
+            aria2_installed = subprocess.run(['which', 'aria2c'], capture_output=True).returncode == 0
+            logger.info(f"aria2c installed: {aria2_installed}")
+
+            if aria2_installed:
+                # ===== METHOD 1: aria2c (ULTRA HIGH SPEED) =====
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+                    tmp_path = tmp.name
+                
+                aria2_cmd = [
+                    'aria2c', '-x16', '-s16', '-k1M',
+                    '--dir', os.path.dirname(tmp_path),
+                    '--out', os.path.basename(tmp_path),
+                    '--console-log-level=error',
+                    '--summary-interval=0',
+                    '--max-connection-per-server=16',
+                    '--split=16',
+                    '--min-split-size=1M',
+                    url
+                ]
+                
+                logger.info(f"Running aria2c command: {' '.join(aria2_cmd)}")
+                start_time = time.time()
+                
+                process = await asyncio.create_subprocess_exec(
+                    *aria2_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    logger.error(f"aria2c failed: {stderr.decode()[:500]}")
+                    raise Exception(f"aria2c download failed")
+                
+                elapsed = time.time() - start_time
+                logger.info(f"aria2c download completed in {elapsed:.2f}s")
+                
+            else:
+                # ===== METHOD 2: aiohttp with parallel chunks (FAST) =====
+                await msg.edit_text("📥 **Downloading with parallel streams...**")
+                CHUNK_SIZE = 2 * 1024 * 1024  # 2MB chunks
+                NUM_THREADS = 12  # Parallel connections
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            return await event.reply("❌ Failed to fetch file.")
+                        
+                        total_size = int(resp.headers.get('content-length', 0))
+                        if total_size == 0:
+                            # If no content-length, download normally
+                            content = await resp.read()
+                            filename = url.split('/')[-1].split('?')[0] or "downloaded_file"
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+                                tmp.write(content)
+                                tmp_path = tmp.name
+                            file_size = len(content)
+                        else:
+                            filename = url.split('/')[-1].split('?')[0] or "downloaded_file"
+                            
+                            # Allocate file space
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+                                tmp_path = tmp.name
+                            with open(tmp_path, 'wb') as f:
+                                f.truncate(total_size)
+                            
+                            async def download_chunk(start, end, session, tmp_path):
+                                headers = {'Range': f'bytes={start}-{end}'}
+                                async with session.get(url, headers=headers) as resp:
+                                    if resp.status == 416:  # Range not satisfiable
+                                        return 0
+                                    chunk = await resp.read()
+                                    with open(tmp_path, 'r+b') as f:
+                                        f.seek(start)
+                                        f.write(chunk)
+                                    return len(chunk)
+                            
+                            # Create tasks for parallel downloads
+                            tasks = []
+                            for i in range(NUM_THREADS):
+                                start = i * CHUNK_SIZE
+                                end = min(start + CHUNK_SIZE - 1, total_size - 1)
+                                if start < total_size:
+                                    tasks.append(download_chunk(start, end, session, tmp_path))
+                            
+                            # Wait for all chunks
+                            results = await asyncio.gather(*tasks)
+                            file_size = sum(results)
+                            
+                            if file_size != total_size:
+                                logger.warning(f"Incomplete download: {file_size}/{total_size} bytes")
+                                # If incomplete, try single-thread fallback
+                                await msg.edit_text("🔄 Retrying with single stream...")
+                                async with session.get(url) as resp2:
+                                    content = await resp2.read()
+                                    with open(tmp_path, 'wb') as f:
+                                        f.write(content)
+                                    file_size = len(content)
+
         except Exception as e:
             logger.error(f"Link handler error: {e}")
-            return await event.reply(f"❌ Error processing link: {str(e)[:100]}")
+            await msg.edit_text(f"❌ Error processing link: {str(e)[:100]}")
+            return
 
-        # Generate permanent link
+        # ===== Upload to Telegram =====
+        await msg.edit_text("📤 **Uploading to Telegram...**")
+        
+        try:
+            file_msg = await bot.send_file(
+                event.chat_id,
+                tmp_path,
+                caption=filename
+            )
+            
+            # Extract file_id
+            if file_msg.document:
+                doc = file_msg.document
+                file_id = f"{doc.id}_{doc.access_hash}"
+                file_name = filename
+                file_size = doc.size
+                mime_type = doc.mime_type or "application/octet-stream"
+            else:
+                return await event.reply("❌ Failed to upload file.")
+            
+            # Clean up temp file
+            os.remove(tmp_path)
+            
+        except Exception as e:
+            logger.error(f"Upload error: {e}")
+            await msg.edit_text(f"❌ Upload failed: {str(e)[:100]}")
+            return
+
+        # ===== Generate permanent link =====
         short_code = generate_short_code()
-        expiry_time = None  # Permanent
+        expiry_time = None
         
         file_meta = FileMetadata(
             file_id=file_id,
@@ -270,6 +368,8 @@ def register_handlers(bot):
                 [Button.inline("Delete Link", f"del_{short_code}".encode())]
             ]
         )
+        
+        await msg.delete()
 
     @bot.on(events.CallbackQuery())
     async def global_callback_check(event):
