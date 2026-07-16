@@ -4,9 +4,47 @@ from telethon.tl.types import Document, Photo
 from fastapi import Request, HTTPException
 from fastapi.responses import StreamingResponse
 import logging
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
+# ─── Helper: Safe Filename Encoding ────────────────────────────────────────────
+def encode_filename(filename: str) -> str:
+    """
+    Encode filename for HTTP headers (RFC 5987).
+    Uses percent-encoding for Unicode characters, with ASCII fallback.
+    """
+    try:
+        # Try ASCII first
+        filename.encode('ascii')
+        return filename
+    except UnicodeEncodeError:
+        # Use RFC 5987 encoding for Unicode filenames
+        encoded = ''
+        for char in filename:
+            if ord(char) < 128:
+                encoded += char
+            else:
+                encoded += f'%{ord(char):02X}'
+        return encoded
+
+def safe_content_disposition(filename: str, disposition: str = "attachment") -> str:
+    """
+    Generate a Content-Disposition header that handles Unicode filenames safely.
+    Uses both ASCII fallback and RFC 5987 encoding for maximum compatibility.
+    """
+    # ASCII fallback (remove non-ASCII chars)
+    ascii_name = unicodedata.normalize('NFKD', filename).encode('ascii', 'ignore').decode('ascii')
+    if not ascii_name:
+        ascii_name = "download"
+    
+    # RFC 5987 encoded name
+    encoded_name = encode_filename(filename)
+    
+    return f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded_name}'
+
+
+# ─── Ultra High Speed Streamer ──────────────────────────────────────────────────
 async def ultra_high_speed_streamer(clients: list, file, start: int, end: int, chunk_size: int = 1024 * 1024):
     """
     Refactored ultra-high-speed multi-session streamer.
@@ -99,6 +137,8 @@ async def ultra_high_speed_streamer(clients: list, file, start: int, end: int, c
     for w in workers: w.cancel()
     logger.info(f"Stream finished. Total: {bytes_sent/1024/1024:.2f} MB")
 
+
+# ─── Media Streamer ─────────────────────────────────────────────────────────────
 async def media_streamer(clients: list[TelegramClient], file, start: int, end: int):
     """
     Parallel media streamer that fetches multiple chunks from Telegram simultaneously
@@ -162,6 +202,8 @@ async def media_streamer(clients: list[TelegramClient], file, start: int, end: i
             if bytes_sent >= total_to_send:
                 break
 
+
+# ─── Range Header Parser ────────────────────────────────────────────────────────
 def get_range_header(request: Request, file_size: int):
     range_header = request.headers.get("Range")
     if not range_header:
@@ -177,15 +219,20 @@ def get_range_header(request: Request, file_size: int):
 
     return start, min(end, file_size - 1)
 
+
+# ─── Streaming Response ─────────────────────────────────────────────────────────
 async def get_streaming_response(clients: list[TelegramClient], file, file_size: int, filename: str, mime_type: str, request: Request):
     start, end = get_range_header(request, file_size)
+    
+    # SAFE FILENAME ENCODING - Fixes UnicodeEncodeError
+    safe_filename = safe_content_disposition(filename, "attachment")
     
     headers = {
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(end - start + 1),
         "Content-Type": mime_type,
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": safe_filename,
         "Cache-Control": "public, max-age=31536000",  # 1 year caching for CDN
         "Access-Control-Allow-Origin": "*",
     }
@@ -201,7 +248,6 @@ async def get_streaming_response(clients: list[TelegramClient], file, file_size:
 
 
 # ─── FFmpeg Remux Streaming (Audio Track Switching) ───────────────────────────
-
 async def remux_streamer(client: TelegramClient, file, file_size: int, audio_track: int = 0):
     """
     Stream media through FFmpeg to select a specific audio track.
@@ -221,7 +267,7 @@ async def remux_streamer(client: TelegramClient, file, file_size: int, audio_tra
         '-loglevel', 'error',
         '-i', 'pipe:0',                    # Read from stdin
         '-map', '0:v:0',                   # First video stream
-        '-map', f'0:a:{audio_track}',      # Selected audio stream
+        '-map', f'0:a:{audio_track}',      # Selected audio track
         '-c', 'copy',                      # No transcoding
         '-f', 'mp4',                       # Output MP4 container
         '-movflags', 'frag_keyframe+empty_moov+default_base_moof',  # Fragmented MP4
@@ -326,9 +372,12 @@ async def get_remux_response(
     base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
     remux_filename = f"{base_name}.mp4"
     
+    # SAFE FILENAME ENCODING - Fixes UnicodeEncodeError
+    safe_filename = safe_content_disposition(remux_filename, "inline")
+    
     headers = {
         "Content-Type": "video/mp4",
-        "Content-Disposition": f'inline; filename="{remux_filename}"',
+        "Content-Disposition": safe_filename,
         "Cache-Control": "no-cache",  # Don't cache remuxed streams (track-specific)
         "Access-Control-Allow-Origin": "*",
         "Accept-Ranges": "none",  # Seeking not supported in remux mode
