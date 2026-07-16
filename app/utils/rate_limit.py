@@ -4,7 +4,7 @@ import time
 # Memory fallback for when Redis is unavailable
 memory_cache = {}
 
-async def check_rate_limit(user_id: int, limit: int = 5, period: int = 60):
+async def check_rate_limit(user_id: int, limit: int = 990, period: int = 60):
     """
     Check if a user has exceeded the rate limit.
     limit: number of requests
