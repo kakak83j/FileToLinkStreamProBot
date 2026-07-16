@@ -16,3 +16,4 @@ beautifulsoup4==4.12.3
 markupsafe==2.1.5
 psutil==5.9.8
 httptools==0.6.1
+aiohttp>=3.8.0  # ← यह नई लाइन जोड़ो
