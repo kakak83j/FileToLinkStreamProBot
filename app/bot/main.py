@@ -18,7 +18,7 @@ def register_handlers(bot):
         user_data = await users_col.find_one({"user_id": user_id})
         if user_data and user_data.get('is_banned'):
             return await event.reply("🚫 You are banned from using this bot.")
-            
+           
         if not user_data:
             new_user = User(
                 user_id=user_id,
@@ -27,7 +27,7 @@ def register_handlers(bot):
                 last_name=event.sender.last_name
             )
             await users_col.insert_one(new_user.dict())
-            
+           
             # Log New User
             if settings.CHANNEL_ID:
                 try:
@@ -41,7 +41,7 @@ def register_handlers(bot):
                     )
                 except Exception as e:
                     logger.error(f"Error sending new user log: {e}")
-        
+       
         # Force Sub Check
         if not await is_user_fsubbed(bot, user_id):
             return await event.respond(
@@ -102,12 +102,15 @@ def register_handlers(bot):
             file_size = photo.sizes[-1].size if hasattr(photo.sizes[-1], 'size') else 0
             mime_type = "image/jpeg"
             file_id = f"{photo.id}_{photo.access_hash}"
-        
+       
         if not file_id:
             return
 
         short_code = generate_short_code()
-        
+       
+        # ✅ FIX: Permanent links (never expire)
+        expiry_time = None  # ← यह बदलाव – अब लिंक कभी एक्सपायर नहीं होंगे
+       
         file_meta = FileMetadata(
             file_id=file_id,
             file_unique_id=str(event.id), # Simplified
@@ -118,14 +121,14 @@ def register_handlers(bot):
             short_code=short_code,
             chat_id=event.chat_id,
             message_id=event.id,
-            expiry_time=datetime.datetime.utcnow() + datetime.timedelta(hours=settings.DEFAULT_EXPIRY) if settings.DEFAULT_EXPIRY > 0 else None
+            expiry_time=expiry_time  # ← None = Permanent
         )
-        
+       
         await files_col.insert_one(file_meta.dict())
-        
+       
         download_url = f"{settings.BASE_URL}/dl/{short_code}"
         stream_url = f"{settings.BASE_URL}/watch/{short_code}"
-        
+       
         # Log File Upload
         if settings.CHANNEL_ID:
             try:
@@ -140,16 +143,19 @@ def register_handlers(bot):
                 )
             except Exception as e:
                 logger.error(f"Error sending file log: {e}")
-        
+       
+        # Expiry display message (show "Permanent" instead of hours)
+        expiry_display = "Permanent" if expiry_time is None else f"{settings.DEFAULT_EXPIRY} hours"
+       
         caption = (
             f"✅ **Link Generated!**\n\n"
             f"📁 **File:** `{file_name}`\n"
             f"⚖️ **Size:** `{file_size / (1024*1024):.2f} MB`\n"
-            f"⏳ **Expiry:** `{settings.DEFAULT_EXPIRY} hours`\n\n"
+            f"⏳ **Expiry:** `{expiry_display}`\n\n"
             f"📥 **Download:** {download_url}\n"
             f"🎬 **Stream:** {stream_url}"
         )
-        
+       
         await event.reply(
             caption,
             buttons=[
@@ -162,7 +168,7 @@ def register_handlers(bot):
     async def global_callback_check(event):
         if not await is_user_fsubbed(bot, event.sender_id):
             return await event.answer("❌ You must join the channel first!", alert=True)
-        
+       
     @bot.on(events.CallbackQuery(pattern=b'help'))
     async def help_callback(event):
         await event.answer("Just send any file to get a direct link!", alert=True)
@@ -192,10 +198,10 @@ def register_handlers(bot):
     async def stats_handler(event):
         if event.sender_id not in settings.admin_list and event.sender_id != settings.OWNER_ID:
             return
-        
+       
         total_files = await files_col.count_documents({})
         total_users = await users_col.count_documents({})
-        
+       
         await event.reply(
             f"📊 **System Statistics**\n\n"
             f"👥 Total Users: `{total_users}`\n"
@@ -206,15 +212,15 @@ def register_handlers(bot):
     async def broadcast_handler(event):
         if event.sender_id not in settings.admin_list and event.sender_id != settings.OWNER_ID:
             return
-        
+       
         if not event.reply_to_msg_id:
             return await event.reply("Please reply to a message to broadcast it.")
-            
+           
         msg = await event.get_reply_message()
         users = await users_col.find().to_list(None)
-        
+       
         status = await event.reply(f"🚀 **Broadcast Started...**\nTarget: `{len(users)}` users")
-        
+       
         done = 0
         failed = 0
         for user in users:
@@ -223,17 +229,17 @@ def register_handlers(bot):
                 done += 1
             except Exception:
                 failed += 1
-            
+           
             if done % 20 == 0:
                 await status.edit(f"🚀 **Broadcast in Progress...**\n✅ Done: `{done}`\n❌ Failed: `{failed}`")
-                
+               
         await status.edit(f"✅ **Broadcast Completed!**\n\n🎯 Total: `{len(users)}` users\n✨ Success: `{done}`\n💀 Failed: `{failed}`")
 
     @bot.on(events.NewMessage(pattern='/ban'))
     async def ban_handler(event):
         if event.sender_id not in settings.admin_list and event.sender_id != settings.OWNER_ID:
             return
-        
+       
         try:
             user_id = int(event.text.split()[1])
             await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": True}})
@@ -245,7 +251,7 @@ def register_handlers(bot):
     async def unban_handler(event):
         if event.sender_id not in settings.admin_list and event.sender_id != settings.OWNER_ID:
             return
-        
+       
         try:
             user_id = int(event.text.split()[1])
             await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": False}})
@@ -257,18 +263,16 @@ def register_handlers(bot):
     async def autodel_handler(event):
         if event.sender_id not in settings.admin_list and event.sender_id != settings.OWNER_ID:
             return
-            
+           
         try:
             args = event.text.split()
             if len(args) < 2:
                 return await event.reply("Usage: `/autodel 24h` or `/autodel off`")
-            
+           
             val = args[1].lower()
             if val == "off":
-                # Implementation would require updating global settings or per-user
                 await event.reply("Auto-delete disabled (Global setting remains unchanged).")
             else:
-                # Simple parser for hours
                 hours = int(val.replace("h", ""))
                 await event.reply(f"Auto-delete set to `{hours}` hours for future links.")
         except Exception:
