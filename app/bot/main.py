@@ -164,146 +164,149 @@ def register_handlers(bot):
             ]
         )
 
-    # ─── HIGH-SPEED Direct Link Handler (NO FILE SENT BACK) ──────────────────
+    # ─── DIRECT LINK HANDLER (USING REQUESTS - MOST RELIABLE) ──────────────
     @bot.on(events.NewMessage(pattern=r'https?://[^\s]+'))
     async def link_handler(event):
-        """Direct download link → Permanent Bot Link (High Speed, No File Upload)"""
+        """Download a direct link and return a permanent bot link."""
         
-        # Ban Check
+        # --- Checks (Ban, Rate Limit, FSUB) ---
         user_data = await users_col.find_one({"user_id": event.sender_id})
         if user_data and user_data.get('is_banned'):
             return await event.reply("🚫 You are banned from using this bot.")
-
-        # Rate Limit Check
         if not await check_rate_limit(event.sender_id):
             return await event.reply("⚠️ **Slow down!** Please wait a moment before sending more files.")
-
-        # Force Sub Check
         if not await is_user_fsubbed(bot, event.sender_id):
             return await event.reply(
-                "❌ **Access Denied!**\n\n"
-                "You must join our channels to use this bot.",
+                "❌ **Access Denied!**\n\nYou must join our channels to use this bot.",
                 buttons=[[Button.url("Join Channel", "https://t.me/cantarellabots")]]
             )
 
         url = event.raw_text.strip()
-        msg = await event.reply("📥 **Downloading file at high speed...**")
+        msg = await event.reply("📥 **Starting download...**")
 
         try:
-            import aiohttp
+            import requests
             import os
+            import tempfile
             import time
-            import asyncio
+            from urllib.parse import urlparse
 
-            # ─── Download the file directly (NO Telegram Upload) ────────────
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        return await event.reply("❌ Failed to fetch the file.")
-                    
-                    total_size = int(resp.headers.get('content-length', 0))
-                    filename = url.split('/')[-1].split('?')[0] or "downloaded_file"
-                    
-                    # Save file locally
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
-                        tmp_path = tmp.name
-                    
-                    downloaded = 0
-                    start_time = time.time()
-                    
-                    # Progress tracking
-                    async def update_progress():
-                        nonlocal downloaded
-                        while downloaded < total_size:
-                            percent = (downloaded / total_size) * 100
-                            elapsed = time.time() - start_time
-                            speed = downloaded / elapsed if elapsed > 0 else 0
-                            speed_mb = speed / (1024 * 1024)
-                            eta = (total_size - downloaded) / speed if speed > 0 else 0
+            # --- Step 1: Download the file using requests (stream=True) ---
+            logger.info(f"Attempting to download: {url}")
+            await msg.edit("📥 **Connecting to server...**")
+
+            # Send GET request with timeout
+            response = requests.get(url, stream=True, timeout=30)
+            response.raise_for_status()  # Raises an error for bad status codes (e.g., 404, 403)
+
+            # Get filename from URL or Content-Disposition header
+            filename = url.split('/')[-1].split('?')[0]
+            if not filename or '.' not in filename:
+                filename = "downloaded_file.bin"
+            
+            total_size = int(response.headers.get('content-length', 0))
+            logger.info(f"File size: {total_size} bytes, Filename: {filename}")
+
+            if total_size == 0:
+                logger.warning("Content-Length header missing or zero. Cannot show progress accurately.")
+                await msg.edit("⚠️ **File size unknown. Downloading...**")
+
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+                tmp_path = tmp.name
+            logger.info(f"Temporary file created at: {tmp_path}")
+
+            # --- Step 2: Download with progress ---
+            downloaded = 0
+            start_time = time.time()
+            last_update = start_time
+            chunk_size = 1024 * 1024  # 1MB chunks
+
+            await msg.edit("📥 **Downloading file...**")
+
+            with open(tmp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # Update progress every 1 second
+                        current_time = time.time()
+                        if current_time - last_update >= 1:
+                            percent = (downloaded / total_size) * 100 if total_size > 0 else 0
+                            elapsed = current_time - start_time
+                            speed = (downloaded / elapsed) / (1024 * 1024) if elapsed > 0 else 0
+                            eta = (total_size - downloaded) / (downloaded / elapsed) if downloaded > 0 and elapsed > 0 else 0
                             
+                            # Progress bar
                             filled = int(percent / 10)
                             bar = '█' * filled + '◻️' * (10 - filled)
                             downloaded_mb = downloaded / (1024 * 1024)
-                            total_mb = total_size / (1024 * 1024)
+                            total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
                             
                             progress_text = (
                                 f"╭───⌯═════ 𝐁𝐎𝐓 𝐏𝐑𝐎𝐆𝐑𝐄𝐒𝐒 ═════⌯\n"
                                 f"├  {percent:.1f}% {bar}\n"
                                 f"├\n"
-                                f"├ 🛜  𝗦𝗣𝗘𝗘𝗗 ➤ {speed_mb:.2f} MB/s\n"
+                                f"├ 🛜  𝗦𝗣𝗘𝗘𝗗 ➤ {speed:.2f} MB/s\n"
                                 f"├ ♻️  𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ➤ {downloaded_mb:.2f}MB\n"
                                 f"├ 📦  𝗦𝗜𝗭𝗘 ➤ {total_mb:.2f}MB\n"
                                 f"├ ⏰  𝗘𝗧𝗔 ➤ {eta:.0f}s\n"
                                 f"╰─═══ ⌯ FʀᴏɴᴛMᴀɴ | ×‌× ═══─╯"
                             )
                             await msg.edit(progress_text)
-                            await asyncio.sleep(0.5)
-                    
-                    # Start progress updater
-                    progress_task = asyncio.create_task(update_progress())
-                    
-                    # Download file in chunks
-                    with open(tmp_path, 'wb') as f:
-                        async for chunk in resp.content.iter_chunked(1024 * 1024):
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                    
-                    progress_task.cancel()
-                    
-                    # Final progress update
-                    filled = 10
-                    bar = '█' * 10
-                    downloaded_mb = downloaded / (1024 * 1024)
-                    total_mb = total_size / (1024 * 1024)
-                    progress_text = (
-                        f"╭───⌯═════ 𝐁𝐎𝐓 𝐏𝐑𝐎𝐆𝐑𝐄𝐒𝐒 ═════⌯\n"
-                        f"├  100% {bar}\n"
-                        f"├\n"
-                        f"├ 🛜  𝗦𝗣𝗘𝗘𝗗 ➤ Done!\n"
-                        f"├ ♻️  𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ➤ {downloaded_mb:.2f}MB\n"
-                        f"├ 📦  𝗦𝗜𝗭𝗘 ➤ {total_mb:.2f}MB\n"
-                        f"├ ⏰  𝗘𝗧𝗔 ➤ Completed\n"
-                        f"╰─═══ ⌯ FʀᴏɴᴛMᴀɴ | ×‌× ═══─╯"
-                    )
-                    await msg.edit(progress_text)
+                            last_update = current_time
 
-            # ─── Generate Permanent Link (NO FILE SENT TO TELEGRAM) ──────────
-            short_code = generate_short_code()
-            expiry_time = None
+            # --- Step 3: Verify download ---
+            actual_size = os.path.getsize(tmp_path)
+            logger.info(f"Download completed. Size: {actual_size} bytes")
             
-            # We don't need file_id because we're not sending to Telegram
-            # But we still need to save metadata for the link
+            if total_size > 0 and actual_size != total_size:
+                logger.warning(f"Size mismatch! Expected: {total_size}, Got: {actual_size}")
+                await msg.edit("⚠️ **Download may be incomplete. But continuing...**")
+
+            await msg.edit("✅ **Download complete! Generating link...**")
+
+            # --- Step 4: Generate Permanent Link (No Telegram Upload) ---
+            short_code = generate_short_code()
+            expiry_time = None  # Permanent
+
             file_meta = FileMetadata(
-                file_id=short_code,  # Use short_code as file_id (since we don't have Telegram file_id)
+                file_id=short_code,
                 file_unique_id=short_code,
                 filename=filename,
                 mime_type="application/octet-stream",
-                file_size=os.path.getsize(tmp_path),
+                file_size=actual_size,
                 uploader_id=event.sender_id,
                 short_code=short_code,
                 chat_id=event.chat_id,
                 message_id=event.id,
                 expiry_time=expiry_time
             )
-            
+
             await files_col.insert_one(file_meta.dict())
-            
+            logger.info(f"File metadata saved with short_code: {short_code}")
+
             download_url = f"{settings.BASE_URL}/dl/{short_code}"
             stream_url = f"{settings.BASE_URL}/watch/{short_code}"
-            
-            # Clean up temp file
-            os.remove(tmp_path)
-            
+
+            # Clean up the temp file
+            try:
+                os.remove(tmp_path)
+                logger.info(f"Temporary file removed: {tmp_path}")
+            except Exception as e:
+                logger.warning(f"Could not delete temp file: {e}")
+
+            # --- Step 5: Reply with the Permanent Link ---
             caption = (
                 f"✅ **Permanent Link Generated!**\n\n"
                 f"📁 **File:** `{filename}`\n"
-                f"⚖️ **Size:** `{os.path.getsize(tmp_path) / (1024*1024):.2f} MB`\n"
+                f"⚖️ **Size:** `{actual_size / (1024*1024):.2f} MB`\n"
                 f"⏳ **Expiry:** `Permanent`\n\n"
                 f"📥 **Download:** {download_url}\n"
                 f"🎬 **Stream:** {stream_url}"
             )
-            
+
             await event.reply(
                 caption,
                 buttons=[
@@ -314,9 +317,18 @@ def register_handlers(bot):
             
             await msg.delete()
 
+        except requests.exceptions.Timeout:
+            logger.error(f"Request timeout for URL: {url}")
+            await msg.edit_text("❌ **Error:** Connection timeout. The server took too long to respond.")
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Connection error for URL: {url}")
+            await msg.edit_text("❌ **Error:** Failed to connect to the server. Please check the URL.")
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP error for URL {url}: {e}")
+            await msg.edit_text(f"❌ **Error:** HTTP {response.status_code} - {e}")
         except Exception as e:
-            logger.error(f"Link handler error: {e}")
-            await msg.edit_text(f"❌ Error: {str(e)[:200]}")
+            logger.error(f"Link handler error: {e}", exc_info=True)
+            await msg.edit_text(f"❌ **Error:** `{str(e)[:200]}`")
 
     @bot.on(events.CallbackQuery())
     async def global_callback_check(event):
