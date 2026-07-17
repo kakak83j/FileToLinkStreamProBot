@@ -52,10 +52,10 @@ def register_handlers(bot):
             )
 
         await event.respond(
-            "👋 Welcome to CantarellaBots Media Streamer!\n\n"
+            "👋 Welcome to AJMERA JI Media Streamer!\n\n"
             "Send me any media file and I will generate a direct high-speed download/stream link for you.",
             buttons=[
-                [Button.url("Join Channel", "https://t.me/cantarellabots"), Button.url("Developer", "https://t.me/cantarella_wuwa")],
+                [Button.url("kya hi krega ladle ", "https://t.me/cantarellabots"), Button.url("(⁠•⁠‿⁠•⁠)", "https://t.me/cantarella_wuwa")],
                 [Button.inline("Help", b"help"), Button.inline("About", b"about")]
             ]
         )
